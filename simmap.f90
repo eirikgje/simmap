@@ -39,8 +39,13 @@ program simmap
 
     real(dp)                                            :: Cl_TT, Cl_TE, Cl_EE
     real(dp)                                            :: Cl_BB, chisq
+    real(dp)                                            :: temp_unif_noise
+    real(dp)                                            :: qu_unif_noise
     integer(i4b)                                        :: i, j, m, l, unit
-    character(len=512)                                  :: filename
+    character(len=512)                                  :: filename, paramfile
+    character(len=512)                                  :: cloutfilename
+    character(len=512)                                  :: outfilename
+    character(len=512)                                  :: rmsoutfilename
     type(planck_rng)                                    :: rng_handle   
     real(dp),   pointer,        dimension(:, :)         :: pixwin
     real(dp), allocatable, dimension(:, :)              :: sqrt_covmatrix
@@ -51,21 +56,29 @@ program simmap
     integer(i4b)                                        :: ipix, seed
     character(len=128)                                  :: operation
 
+    unit = getlun()
 
-    nside = 64
-    lmax  = 128
+    call getarg(1, paramfile)
+
+    call get_parameter(unit, paramfile, 'NSIDE', par_int=nside)
+    call get_parameter(unit, paramfile, 'LMAX', par_int=lmax)
+    call get_parameter(unit, paramfile, 'SEED', par_int=seed)
+    call get_parameter(unit, paramfile, 'OPERATION', par_string=operation)
+    call get_parameter(unit, paramfile, 'OUTFILENAME', par_string=outfilename)
+
+    call rand_init(rng_handle, seed)
     npix = 12*nside**2
-    seed = 213409
-    unit = 39
     allocate(cls(2:lmax, 3, 3))
     allocate(beam(0:lmax, 3))
-
-    operation = 'temp_diag'
+    call get_parameter(unit, paramfile, 'BEAMFILE', par_string=filename)
+    call read_beam(filename, beam)
+    call read_pixwin(nside, 3, pixwin)
+    beam = beam * pixwin(0:lmax, 1:3)
+    deallocate(pixwin)
 
     select case (trim(operation))
       case('pol_cov')
          allocate(map_pol(0:npix-1, 3))
-!         allocate(map_pol_mult(0:npix-1, 3, 10))
          allocate(noise(0:3*npix-1))
          nmaps = 3
       case('pol_diag')
@@ -73,11 +86,15 @@ program simmap
          allocate(noise_pol(0:npix-1, 3))
          allocate(rms(0:npix-1, 3))
          nmaps = 3
-      case('temp_diag')
+      case('temp_uniform_diag')
          allocate(map(0:npix-1))
-!         allocate(rms(0:npix-1, 1))
          allocate(noise(0:npix-1))
+         allocate(rms(0:npix-1, 1))
          nmaps = 1
+      case('temp_rmsmap_diag')
+         allocate(map(0:npix-1))
+         allocate(noise(0:npix-1))
+         allocate(rms(0:npix-1, 1))
       case default
          print *, 'unknown operation. Quitting'
          stop
@@ -86,29 +103,28 @@ program simmap
    allocate(alms(nmaps, 0:lmax, 0:lmax))
    allocate(chol(nmaps, nmaps, 2:lmax))
    if (trim(operation) == 'pol_cov') then
-!      filename = '/mn/svati/d1/eirikgje/data/vault/ctp3_simulation_data/covmats/ctp3_madam_covmat_nside16_143GHz_inv_bin.dat.inverse_440_muK_CMB_regularised_sqrt.unf'
-!      filename = '/mn/svati/d1/eirikgje/data/vault/dx7_data/covmats/covmat_nside16_70GHz_DX7_sqrt.unf'
-      filename = '/mn/svati/d1/eirikgje/data/vault/ffp4_data/covmats/covmat_nside16_70GHz_ffp4_sqrt.unf'
+      call get_parameter(unit, paramfile, 'COVMATFILE', par_string=filename)
       call read_covmatrix(unit, filename, ordering, polarization, sqrt_covmatrix, inv, n)
+   else if (trim(operation) == 'temp_rmsmap_diag') then
+      call get_parameter(unit, paramfile, 'RMSFILE', par_string=filename)
+      call read_map(rms, ordering, trim(filename))
+   else if (trim(operation) == 'temp_uniform_diag' .or. trim(operation) == 'pol_diag') then
+      call get_parameter(unit, paramfile, 'RMS_OUTFILE', par_string=rmsoutfilename)
+      call get_parameter(unit, paramfile, 'TEMP_NOISE', par_dp=temp_unif_noise)
+      rms(:, 1) = temp_unif_noise
+      if (trim(operation) == 'pol_diag') then
+         call get_parameter(unit, paramfile, 'QU_NOISE', par_dp=qu_unif_noise)
+         rms(:, 2:3) = qu_unif_noise
+      end if 
    end if
 
-    call rand_init(rng_handle, seed)
-!    filename = '/mn/svati/d1/eirikgje/data/vault/gaussian_beams/beam_14arcmin_lmax2000.fits'
-!    filename = '/mn/svati/d1/eirikgje/data/vault/gaussian_beams/beam_440arcmin_lmax47.fits'
-    filename = '/mn/svati/d1/eirikgje/data/vault/gaussian_beams/beam_900arcmin_1percenttruncated_lmax47.fits'
-!    filename = '/mn/svati/d1/eirikgje/data/vault/cobe_dmr_data/beams/cobe_dmr_beam.fits'
-
-    call read_beam(filename, beam)
-    call read_pixwin(nside, 3, pixwin)
-    beam = beam * pixwin(0:lmax, 1:3)
-    deallocate(pixwin)
-
-!      filename = '/mn/svati/d1/eirikgje/data/vault/tau_likelihood_data/tau_powerspec/taucls_tau' // taustring // '_scalCls.dat'
-   filename = '/mn/svati/d1/eirikgje/data/vault/general/WMAP_bestfit_scalCls_lmax2000.dat'
+   call get_parameter(unit, paramfile, 'CLFILE', par_string=filename)
+   call get_parameter(unit, paramfile, 'CL_OUTFILE', par_string=cloutfilename)
    open(unit, file=trim(filename))
    cls = 0.d0
    do l = 2, lmax
-!        read(unit, *) i, cls(l, 1, 1), cls(l, 2, 2), cls(l, 3, 3), cls(l, 1, 2)
+      !There is an assumed ordering in the cls, no matter whether we want
+      !polarization or not. Can be fixed later.
       read(unit, *) i, cls(l, 1, 1), cls(l, 2, 2), cls(l, 1, 2)
       cls(l, 2, 1) = cls(l, 1, 2)
       cls(l, :, :) = cls(l, :, :)*2.d0*pi/(real(l, dp)*(real(l, dp) + 1.d0))
@@ -125,11 +141,10 @@ program simmap
       chol(3, 3, :) = sqrt(cls(:, 3, 3)-chol(3, 1, :)*chol(3, 1, :)-chol(3, 2, :)*chol(3, 2, :))
    end if
 
-!do k = 1, 10
    allocate(eta(nmaps))
-    alms = 0.d0
-    x = 0.d0
-    eta = 0.d0
+   alms = 0.d0
+   x = 0.d0
+   eta = 0.d0
    do l = 2, lmax
         do m = 0, l
             do i = 1, 2
@@ -152,31 +167,20 @@ program simmap
    deallocate(eta)
    if (trim(operation) == 'pol_cov' .or. trim(operation) == 'pol_diag') then
       call alm2map(nside, lmax, lmax, alms, map_pol)
-      !call alm2map(nside, lmax, lmax, alms, map_pol_mult(:, :, 1))
-      !do k = 2, 10
-      !   map_pol_mult(:, :, k) = map_pol_mult(:, :, 1)
-      !end do
-   else if (trim(operation) == 'temp_diag') then
+   else
       call alm2map(nside, lmax, lmax, alms, map)
    end if
-do k = 1, 10
-!   map = 0
-   deallocate(map)
-   call read_map(map, ordering, '/mn/svati/d1/eirikgje/data/vault/dm_data/nonoise/map_DM_64_20GeV_3e-26_33GHz_nonoise_muK.fits')
 
    if (trim(operation) == 'pol_cov') then
-    !Convert from ring to nest
-    allocate(tempmap(0:npix - 1, 3))
-!    do k = 1, 10
-      tempmap = 0
-      do i = 0, npix - 1
-         call ring2nest(nside, i, ipix)
-!         tempmap(ipix, :) = map_pol_mult(i, :, k)
-         tempmap(ipix, :) = map_pol(i, :)
-      end do
-!      map_pol_mult(:, :, k) = tempmap
-      map_pol = tempmap
-   
+      if (ordering == nest) then
+         allocate(tempmap(0:npix - 1, 3))
+         tempmap = 0
+         do i = 0, npix - 1
+            call ring2nest(nside, i, ipix)
+            tempmap(ipix, :) = map_pol(i, :)
+         end do
+         map_pol = tempmap
+      end if
       !ADD NOISE (COVMATRIX)
       noise = 0
       allocate(eta(0:3*npix-1))
@@ -186,82 +190,50 @@ do k = 1, 10
       noise = matmul(sqrt_covmatrix, eta)
       do i = 1, 3
          do j = 0, npix - 1
-             !map_pol(j, i) = map_pol(j, i) + noise((i - 1) * npix + j)
-             map_pol(j, i) = map_pol(j, i) + 2 * noise((i - 1) * npix + j)
-!             map_pol_mult(j, i, k) = map_pol_mult(j, i, k) + 2 * noise((i - 1) * npix + j)
+               map_pol(j, i) = map_pol(j, i) + noise((i - 1) * npix + j)
          end do
       end do
       deallocate(eta)
 
-      !Convert back to ring
-      tempmap = 0
-      do i = 0, npix - 1
-         call nest2ring(nside, i, ipix)
-         tempmap(ipix, :) = map_pol(i, :)
-!         tempmap(ipix, :) = map_pol_mult(i, :, k)
-      end do
-!      map_pol_mult(:, :, k) = tempmap
-      map_pol = tempmap
-!   end do
-   deallocate(tempmap)
-   else if (trim(operation) == 'pol_diag' .or. trim(operation) == 'temp_diag') then
-
-      !ADD NOISE (DIAG)
-      if (k == 1) then
-         call read_map(rms, ordering, '/mn/svati/d1/eirikgje/data/vault/wmap_data/rms/wmap_9yr_rms_Ka_I_muK_ns64.fits')
+      if (ordering == nest) then
+         !Convert back to ring
+         tempmap = 0
+         do i = 0, npix - 1
+            call nest2ring(nside, i, ipix)
+            tempmap(ipix, :) = map_pol(i, :)
+         end do
+         map_pol = tempmap
+         deallocate(tempmap)
       end if
-      !rms = rms * 0.005
-!      rms(:, 1) = 0.30
-!      rms(:, 1) = 65.0
-!      rms(:, 2:3) = sqrt(0.35d0)
-
+   else
       do i = 1, nmaps
          do j = 0, npix-1
-            if (trim(operation) == 'temp_diag') then
+            if (trim(operation) == 'temp_rmsmap_diag' .and. ordering == nest) then
                call nest2ring(nside, j, ipix)
-!               noise(j) = rms(j, i)*rand_gauss(rng_handle)
                noise(ipix) = rms(j, i)*rand_gauss(rng_handle)
             else if (trim(operation) == 'pol_diag') then
                noise_pol(j, i) = rms(j, i)*rand_gauss(rng_handle)
+            else 
+               noise(j) = rms(j, i)*rand_gauss(rng_handle)
             end if
         end do
       end do
 
-      if (trim(operation) == 'temp_diag') then
-         map = map + noise
-      else if (trim(operation) == 'pol_diag') then
+      if (trim(operation) == 'pol_diag') then
          map_pol = map_pol + noise_pol
+      else
+         map = map + noise
       end if
    end if
 
-!   do k = 1, 10
-   call int2string(k, simulstring)
-!   filename = 'ffp4_ownsimul_4timescovmat_70GHz_nside16_440arcmin_WMAP_bestfit_lmax47_cmbsimul' // simulstring // '.fits'
-   !filename = 'ffp4_ownsimul_4timescovmat_70GHz_nside16_600arcmin_1percenttruncated_WMAP_bestfit_lmax47_cmbsimul' // simulstring // '.fits'
-!   filename = 'ffp4_ownsimul_4timescovmat_70GHz_nside16_900arcmin_1percenttruncated_WMAP_bestfit_lmax47.fits'
-!   filename = 'WMAP_bestfit_simul_n32_cobe_beam_diag_0.3muK_I_lmax95.fits'
-!   filename = 'dx7_ownsimul_4timesnonsmoothcovmat_70GHz_nside16_440_arcmin_WMAP_bestfit_lmax47_2.fits'
-   filename = 'map_DM_64_20GeV_3e-26_33GHz_wmap_Ka_noise_simul' // simulstring // '.fits'
    if (trim(operation) == 'pol_cov' .or. trim(operation) == 'pol_diag') then
-!      call write_map(map_pol_mult(:, :, k), ring, filename)
-      call write_map(map_pol, ring, filename)
-!      map_pol = 1.d0
-!      filename = 'mask_fullsky_n16.fits'
-!      call write_map(map_pol, ring, filename)
-   else if (trim(operation) == 'temp_diag') then
-      call write_map(map, ring, filename)
-      map = 1.d0
-      filename = 'mask_fullsky_n64.fits'
-      call write_map(map, ring, filename)
+      call write_map(map_pol, ring, outfilename)
+   else
+      call write_map(map, ring, outfilename)
    end if
-   if (trim(operation) == 'temp_diag' .or. trim(operation) == 'pol_diag') then
-      filename = 'rms_0.3muK_I_nside32.fits'
-      call write_map(rms, ring, filename)
+   if (trim(operation) == 'temp_uniform_diag' .or. trim(operation) == 'pol_diag') then
+      call write_map(rms, ring, rmsoutfilename)
    end if
-end do
-!   currtau = currtau + deltatau
-
-
    
    do l = 2, lmax
       do j = 1, nmaps
@@ -269,8 +241,7 @@ end do
       end do
    end do
 
-!   open(unit, file='clout_dx7simul_tau' // taustring // '.dat', recl=512)
-   open(unit, file='clout_WMAP_bestfit_lmax47.dat', recl=512)
+   open(unit, file=cloutfilename, recl=512)
    do l = 2, lmax
       Cl_TT = 0
       Cl_TE = 0
@@ -300,13 +271,12 @@ end do
       Cl_EE = Cl_EE * float(l * (l + 1)) / (2.d0 * pi * float(2 * l + 1))
       Cl_BB = Cl_BB * float(l * (l + 1)) / (2.d0 * pi * float(2 * l + 1))
 
-      if (trim(operation) == 'temp_diag') then
+      if (trim(operation) == 'temp_uniform_diag' .or. trim(operation) == 'temp_rmsmap_diag') then
          write(unit, *) l, Cl_TT
       else if (trim(operation) == 'pol_diag' .or. trim(operation) == 'pol_cov') then
          write(unit, *) l, Cl_TT, Cl_EE, Cl_BB, Cl_TE
       end if
    end do
    close(unit)
-!end do
 
 end program simmap
